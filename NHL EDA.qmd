@@ -1,0 +1,260 @@
+---
+title: "EDA and Feature Engineering"
+format: html
+execute:
+  warning: false
+editor: visual
+---
+
+```{r}
+#| echo: false
+#| warning: false
+library(htmltools)
+library(slickR)
+library(dplyr)
+library(ggplot2)
+library(ggridges)
+raw.df <- read.csv2("nhl regular season data 2017 - 2023.csv")
+raw.df[raw.df == ''] <- NA
+
+# Rolling metrics will have problems up for the 2020 - 2021 season due to COVID & the long pause in games. For the sake of EDA, let's exclude it 
+eda.df <- raw.df[raw.df$season != 20202021,]
+eda.df$eloDifferential <- as.numeric(eda.df$eloDifferential)
+```
+
+```{r}
+#| echo: false
+
+metrics = c("r3_winRatio",
+            "r7_winRatio",
+            "r3_shotDifferential",
+            "r7_shotDifferential",
+            "r3_faceoffWinPct",
+            "r7_faceoffWinPct"
+            )
+# Common knowledge that home teams have an advantage (crowd effects, rest, and some specific privileges granted by the rules ("last change rule"))
+title <- "Home team was 17% more likely to win"
+subtitle <- ""
+ylab <- "Win proportion"
+xlab <- "Home Field Advantage Flag"
+xlevels <- c("Visitor","Home Team")
+homefield <- eda.df %>% 
+  group_by(flagHome) %>% 
+  summarize(winRate = mean(wins)) %>%
+  ggplot(aes(x = flagHome,y = winRate)) +
+  geom_col(aes(fill = flagHome)) +
+  geom_label(aes(label = round(winRate,2))) + 
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = c(0,1)) +
+  ggtitle(title,subtitle) +
+  ylab(ylab) + 
+  xlab(xlab)
+
+#,height=100, width = "95%")
+
+# Do teams tend to respond after they get their butt kicked in the previous game?
+title <- "No significant performance boost following a blowout loss"
+subtitle <- "Poor game defined as losing by 5 or more goals"
+ylab <- "Win proportion"
+xlab <- "Did the team get its butt kicked in the previous game?"
+
+blowout <- eda.df %>% 
+  group_by(flagBlownOut) %>% 
+  summarize(winRate = mean(wins)) %>%
+  ggplot(aes(x = flagBlownOut,y = winRate)) +
+  geom_col(aes(fill = flagBlownOut)) +
+  geom_label(aes(label = round(winRate,2))) + 
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = c(0,1)) +
+  ggtitle(title,subtitle) +
+  ylab(ylab) + 
+  xlab(xlab)
+
+# Do tired teams win less often? 
+title <- "Tired teams are 14% less likely to win"
+subtitle <- ""
+ylab <- "Win proportion"
+xlab <- "Did the team play yesterday?"
+
+b2b <- eda.df %>% 
+  group_by(flagB2B) %>% 
+  summarize(winRate = mean(wins)) %>%
+  ggplot(aes(x = flagB2B,y = winRate)) +
+  geom_col(aes(fill = flagB2B)) +
+  geom_label(aes(label = round(winRate,2))) + 
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = c(0,1)) +
+  ggtitle(title,subtitle) +
+  ylab(ylab) + 
+  xlab(xlab)
+
+# Could extend this: do rested teams tend to beat tired teams?
+
+# Do "stronger" teams tend to beat "weaker" teams (as measured by ELO)?
+
+
+eda.df$eloBuckets <- cut(eda.df$eloDifferential, 
+                   breaks=c(-Inf, -100, 0, 100, Inf), 
+                   labels=c("< -100","-100 to 0", "1 to 100","> 100"))
+
+title <- "Teams with higher Elo scores tend to win"
+subtitle <- ""
+ylab <- "Win proportion"
+xlab <- "Elo differential (bucketed)"
+elo <- eda.df %>% 
+  group_by(eloBuckets) %>% 
+  summarize(winRate = mean(wins)) %>%
+  ggplot(aes(x = eloBuckets,y = winRate)) +
+  geom_col() +
+  geom_label(aes(label = round(winRate,2))) + 
+  theme(legend.position = "none") +
+  ggtitle(title,subtitle) +
+  ylab(ylab) + 
+  xlab(xlab)
+
+title <- "Recent performance tends to continue"
+subtitle <- "Short lookback window: 3 games"
+ylab <- "Win proportion for next game"
+xlab <- "Win proportion over last 3 games"
+win3 <- eda.df %>% 
+  group_by(r3_winRatio) %>% 
+  filter(!is.na(r3_winRatio)) %>%
+  summarize(winRate = mean(wins)) %>%
+  ggplot(aes(x = round(as.numeric(r3_winRatio),3), y = winRate)) +
+  scale_x_continuous(breaks = c(0,0.33,0.67,1)) +
+  geom_col(na.rm = TRUE) + 
+  geom_label(aes(label = round(winRate,2))) +
+  ggtitle(title,subtitle) +
+  ylab(ylab) + 
+  xlab(xlab)
+
+title <- "Recent performance tends to continue"
+subtitle <- "Long lookback window: 7 games"
+ylab <- "Win proportion for next game"
+xlab <- "Win proportion over last 7 games"
+win7 <- eda.df %>% 
+  group_by(r7_winRatio) %>% 
+  filter(!is.na(r7_winRatio)) %>%
+  summarize(winRate = mean(wins)) %>%
+  ggplot(aes(x = round(as.numeric(r7_winRatio),3), y = winRate)) +
+  scale_x_continuous(breaks = c(0,0.14,0.29,0.43,0.57,0.71,0.86,1)) +
+  geom_col(na.rm = TRUE) + 
+  geom_label(aes(label = round(winRate,2))) +
+  ggtitle(title,subtitle) +
+  ylab(ylab) + 
+  xlab(xlab)
+
+# eda.df %>% 
+#   group_by(r3_shotDifferential) %>% 
+#   filter(!is.na(r3_shotDifferential)) %>%
+#   ggplot(aes(x = as.numeric(r3_shotDifferential), color = as.factor(wins)))+ 
+#   geom_density(na.rm = TRUE) 
+
+# eda.df %>% 
+#   group_by(r7_shotDifferential) %>% 
+#   filter(!is.na(r7_shotDifferential)) %>%
+#   ggplot(aes(x = as.numeric(r7_shotDifferential), color = as.factor(wins)))+ 
+#   geom_density(na.rm = TRUE) 
+
+# eda.df %>% 
+#   group_by(r3_faceoffWinPct) %>% 
+#   filter(!is.na(r3_faceoffWinPct)) %>%
+#   ggplot(aes(x = as.numeric(r3_faceoffWinPct), color = as.factor(wins)))+ 
+#   geom_density(na.rm = TRUE) 
+
+
+# eda.df %>% 
+#   group_by(r7_faceoffWinPct) %>% 
+#   filter(!is.na(r7_faceoffWinPct)) %>%
+#   ggplot(aes(x = as.numeric(r7_faceoffWinPct), color = as.factor(wins)))+ 
+#   geom_density(na.rm = TRUE) 
+
+
+ggsave(
+  "homefield.png",
+  plot = homefield,
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = 1200,
+  height = 1400,
+  units = "px",
+  dpi = 300,
+  limitsize = TRUE,
+  bg = "#F7F6F4"
+)
+
+ggsave(
+  "b2b.png",
+  plot = b2b,
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = 1200,
+  height = 1400,
+  units = "px",
+  dpi = 300,
+  limitsize = TRUE,
+  bg = "#F7F6F4"
+)
+
+ggsave(
+  "blowout.png",
+  plot = blowout,
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = 1200,
+  height = 1400,
+  units = "px",
+  dpi = 300,
+  limitsize = TRUE,
+  bg = "#F7F6F4"
+)
+
+ggsave(
+  "elo.png",
+  plot = elo,
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = 1200,
+  height = 1400,
+  units = "px",
+  dpi = 300,
+  limitsize = TRUE,
+  bg = "#F7F6F4"
+)
+
+ggsave(
+  "win3.png",
+  plot = win3,
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = 1200,
+  height = 1400,
+  units = "px",
+  dpi = 300,
+  limitsize = TRUE,
+  bg = "#F7F6F4"
+)
+
+ggsave(
+  "win7.png",
+  plot = win7,
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = 1200,
+  height = 1400,
+  units = "px",
+  dpi = 300,
+  limitsize = TRUE,
+  bg = "#F7F6F4"
+)
+
+slickR(obj = c("homefield.png","b2b.png","elo.png","win3.png","win7.png"), width = "100%", height = 420) + settings(dots = TRUE, arrows = TRUE, fade = TRUE) 
+
+
+```

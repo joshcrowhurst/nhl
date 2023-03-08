@@ -1,0 +1,102 @@
+---
+title: "NHL Modelling Raw Data"
+format: html
+execute:
+  warning: false
+editor: visual
+---
+
+```{r}
+#| echo: false
+#| warning: false
+library(httr)
+library(glue)
+library(jsonlite)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(ROCR)
+library(caTools)
+library(class)
+library(caret)
+library(tidymodels)
+library(tidyverse)
+library(future)
+library(rsample)
+library(workflowsets)
+
+set.seed(0) # For reproducibility
+
+call_nhl <- function(startSeason, endSeason="") {
+  if (endSeason == "") { endSeason = startSeason }
+  headers <- c('authority' = 'api.nhle.com',
+      # Could cycle through different user agents using the fake-useragent module 
+      # if the API appears to be blocking repeated calls
+      'user-agent' = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.141 Safari/537.36',
+      'accept' = '*/*',
+      'origin' = 'http://www.nhl.com',
+      'sec-fetch-site' = 'cross-site',
+      'sec-fetch-mode' = 'cors',
+      'sec-fetch-dest' = 'empty',
+      'referer' = 'http://www.nhl.com/',
+      'accept-language' = 'en-US,en;q=0.9')
+    params <- list(
+      'isAggregate' = 'false',
+      'isGame' = 'true',
+      'sort' = '%5B%7B%22property%22%3A%22gameDate%22%2C%22direction%22%3A%22DESC%22%7D%5D',
+      'start' = '0',
+      # Setting limit = 0 returns all games for given season
+      'limit' = '0',
+      'factCayenneExp' = 'gamesPlayed%3E%3D1',
+      # Through trial and error, gameTypeId=2 corresponds to regular season games
+      # The f-string inserts endSeason and startSeason into the parameters
+      'cayenneExp' = glue('gameTypeId%3D2+and+seasonId%3C%3D{endSeason}+and+seasonId%3E%3D{startSeason}'))
+    url = "https://api.nhle.com/stats/rest/en/team/summary?"
+    response <- httr::GET(url = paste(url, paste(names(params), params, sep = "=", collapse = "&"),sep=""), add_headers(headers))
+    return(response)
+}
+
+get_gameData <- function(startYear, numSeasons) {
+  seasons = {}
+  for(i in 1:numSeasons) {
+    s = paste0(startYear+i-1,startYear+i)
+    seasons[i] = s 
+  }
+  rows=0
+  res = data.frame()
+
+  for(s in seasons) {
+    response = call_nhl(s)
+    response = content(response)
+    rows = rows+length(response['data'][[1]])
+    df = rbindlist(response['data'][[1]], fill=TRUE) |> mutate(season = s)
+    if (length(res) == 0) {
+      res = df
+    } else {
+      res = rbind(res,df)
+    }
+    #print(glue("Number of games grabbed for {s} = {length(response['data'][[1]])}. Total = {rows}"))
+  }
+  return(res)
+}
+nhlAPI.df <- get_gameData(2017,5)
+elo.df <- read.csv('/Users/hophknx/Library/CloudStorage/OneDrive-AIAGroupLtd/Documents/01 Admin/NHL/nhl_elo.csv') %>% filter((season %in% c(2018,2019,2020,2021,2022)))
+
+```
+
+## NHL API data
+
+Game data extracted programmatically from the NHL API. Includes game outcomes and some key figures per game (goals for/against, shots for/against, special teams, faceoffs won/lost, etc.)
+
+```{r}
+rmarkdown::paged_table(head(nhlAPI.df,5))
+```
+
+## Elo data courtesy of FiveThirtyEight
+
+FiveThirtyEight hosts a free public dataset for NHL Elo scores, documented at https://fivethirtyeight.com/methodology/how-our-nhl-predictions-work/
+
+```{r}
+rmarkdown::paged_table(head(elo.df,5))
+```

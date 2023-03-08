@@ -1,0 +1,198 @@
+---
+title: "Predicting NHL Game Outcomes"
+subtitle: "<p style='font-size:1em; font-weight:normal;'>A machine learning practice project <br> By Josh Crowhurst <br> March 2023</p>"
+website:
+  favicon: images/favicon.ico
+format:
+  revealjs: 
+    theme: [default, custom.scss]
+    slide-number: true
+    preview-links: auto
+    transition: slide
+    transition-speed: fast
+    css: style.css
+    title-slide-attributes:
+      data-background-image: images/titleslide.png
+      data-background-size: cover  
+      text-align: left
+  html:
+    link-external-newwindow: true
+    backgroundcolor: "#F9F6F1"
+---
+# The challenge: create a model that predicts NHL game outcomes, and performs on par with other NHL prediction models  {background="#43464B"}
+<style>
+#the-challenge-create-a-model-that-predicts-nhl-game-outcomes-and-performs-on-par-with-other-nhl-prediction-models h1 {
+    font-size:1.3em;
+}
+.reveal section p {
+    font-size: 0.5em;
+}
+
+.reveal section li {
+    font-size: 0.5em;
+}
+
+.reveal section ul {
+    padding-bottom: 0px;
+    margin-bottom: 0px;
+    border-bottom: 0px;
+}
+
+.reveal section pre code {
+    font-size: 0.5em;
+}
+.overlay {
+  pointer-events: none;
+}
+</style>
+
+::: footer
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+## Overview of Project 🏒 
+::: {layout="[[-1], [1], [-1]]"}
+![](images/process.png){fig-align="center"}
+
+:::
+
+::: footer
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+## Input Data
+:::: {.columns .v-center-container}
+
+::: {.column width="50%"}
+<b>Data used:</b>
+
+- <b>Source 1:</b> Game data pulled from the NHL API
+- <b>Source 2:</b> Elo data from [FiveThirtyEight](https://fivethirtyeight.com/methodology/how-our-nhl-predictions-work/) 
+- Train/test: 2017-2022. Validation: Current season
+- 6807 total games in dataset
+
+::: {.fragment}
+<b>Initial hypotheses:</b>
+
+- Playing on back-to-back nights reduces chance of win
+- Teams on win/loss streaks will extend their streaks
+- "Stronger" teams are likely to beat "weaker" teams
+:::
+:::
+
+::: {.column width="50%"}
+<iframe width="515" height="525" src="/Raw-Data.html" frameborder="0" style="border:0; right:0px; position: absolute" allowfullscreen data-external="1"  z-index:1></iframe>
+
+:::
+
+::::
+::: footer
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+## Exploratory Data Analysis
+:::: {.columns}
+::: {.column width="50%"}
+<b>EDA helped inform feature engineering and decide which features to include:</b> 
+
+- ✅ Home or away flag
+- ✅ Tired / rested flag
+- ✅ Elo differential between team and opponent
+- ✅ Recent short-term win rate (3- and 7-game windows)
+- ❌ Trends in special teams, faceoff %, shot differential
+- ❌ Blowout loss in previous game flag
+
+
+::: {.fragment}
+<b>And inspired some additional features to include in future:</b>
+
+- <b>Personnel-related features:</b> backup goaltenders, injuries and absences
+- <b>More robust "tiredness" proxies:</b> KMs travelled and number of games over previous 4 calendar days
+- <b>More opposing team features:</b> short term win rate, tired / rested, personnel features
+:::
+:::
+
+::: {.column width="50%"}
+<iframe width="515" height="525" src="/NHL%20EDA.html" frameborder="0" style="border:0; right:0px; top:100px; position: absolute" allowfullscreen data-external="1"  z-index:1></iframe>
+
+:::
+
+::::
+::: footer
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+## Modelling with tidymodels 
+
+The [tidymodels framework](https://www.tidymodels.org/) helps simplify and align the syntax of various popular packages for machine learning. It was useful here to train and evaluate multiple algorithms with minimal configuration
+
+<br>
+
+::: {.r-stack}
+![](images/modelling1.png)
+
+![](images/modelling2.png){.fragment}
+
+![](images/modelling3.png){.fragment}
+
+![](images/modelling4.png){.fragment}
+:::
+::: footer
+Competitive model performance through February 23, 2023 provided by [@HockeySktte](https://twitter.com/HockeySkytte/status/1628821904218853378/photo/1) on Twitter
+
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+# The next natural question: can it be used for profitable sports betting? {background="#43464B"}
+<style>
+#the-next-natural-question-can-it-be-used-for-profitable-sports-betting h1 {
+    font-size:1.3em;
+}
+</style>
+
+::: footer
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+## More work needed to take this beyond a learning exercise
+:::: {.columns .v-center-container}
+
+::: {.column width="50%"}
+I used odds data from [bettingdata.com](www.bettingdata.com/nhl/odds) to backtest a simple strategy: wagering $100 any time the model suggested a positive expected value on a bet during the season to date. 
+
+This strategy was not profitable, with a cumulative loss of -10.5% ($2538) on 241 bets.
+
+::: {.fragment}
+<b>A few next steps to make this usable for sports betting:</b>
+
+- Improve model with additional features
+- Test additional algorithms; neural network was not used due to technical difficulties 💔
+- Try more realistic betting strategies such as variable bet sizing or using model as decision support system
+:::
+:::
+
+::: {.column width="50%"}
+<img width="450" height="525" src="images/bets.png" frameborder="0" style="border:0; right:23px; top:100px; position: absolute" allowfullscreen data-external="1"  z-index:1></iframe>
+
+:::
+
+::::
+::: footer
+[**Contact Me**](mailto:josh.crowhurst@gmail.com)
+:::
+
+# Thanks for reading {background="#43464B"}
+:::: {.columns}
+
+::: {.column width="80%"}
+Get in touch:
+
+- [**josh.crowhurst@gmail.com**](mailto:josh.crowhurst@gmail.com)
+- [**LinkedIn**](https://www.linkedin.com/in/josh-crowhurst/)
+:::
+
+::: {.column width="20%"}
+<img src="images/memoji.png" frameborder="0" style="z-index:9; right:0px; top:-80px; position: absolute; border:0" allowfullscreen data-external="1" pointer-events="none">
+:::
+
+::::

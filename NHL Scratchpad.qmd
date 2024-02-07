@@ -1,0 +1,764 @@
+---
+title: "NHL Exploration"
+format: html
+editor: visual
+---
+
+## NHL Win Prediction - Modelling
+
+To do:
+
+-   Check how original guy did the rolling win rate
+
+-   Slide with runtime that pulls in "who will win tonight"
+
+-   Try tuning models with tidymodels including logistic
+
+-   Evaluate results for "high confidence games" vs. betting line
+
+-   Credit original function writer and ELO data source
+
+-   Study log loss so I can explain it
+
+-   Add distance traveled and other more elaborate features
+
+-   Actually make an EDA document
+
+-   Make a prediction tool with latest data being pulled in
+
+-   Make into Quarto preso
+
+-   Drop or impute rows with NA for rolling windows?
+
+-   Think about how to handle playoff predictions / brackets (modelling may be more useful to predict a best of 7 vs predicting a single game)
+
+**Load libraries, import functions, and define settings to query to API and process data:**
+
+```{r echo: false}
+library(httr)
+library(here)
+library(glue)
+library(jsonlite)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(ROCR)
+library(caTools)
+library(class)
+library(caret)
+library(tidymodels)
+library(tidyverse)
+library(future)
+library(rsample)
+library(workflowsets)
+source("NHL API and Feature Eng Functions.R") # Custom functions
+
+#### Settings ####
+earliestSeason <- 2017
+numSeasons <- 6 # 5 train/validate, 1 test
+latest <- "20222023" # Will use as test data
+set.seed(0) # For reproducibility
+
+```
+
+**Grab the data: API and other data sources for selected seasons (default 2017-2018 through 2022-2023)**
+
+```{r echo: false}
+raw.df <- get_gameData(earliestSeason, numSeasons, gameType = 2)
+elo.df <- read.csv('nhl_elo.csv') %>% 
+  filter((season %in% makeSeasons(earliestSeason,numSeasons)))
+```
+
+**Clean data**
+
+```{r}
+# Clean data
+raw.df$gameDate <- ymd(raw.df$gameDate)
+elo.df$date <- ymd(elo.df$date)
+elo.df$home_team_abbr[which(elo.df$home_team_abbr == "VEG")] <- "VGK"
+elo.df$away_team_abbr[which(elo.df$away_team_abbr == "VEG")] <- "VGK"
+
+# Adds team code for matching the ELO dataset
+# Lookup table for team name / abbreviation. There's probably a better way to do this, revisit later
+# Can use getTeamAbbr['teamFullName'] to return the full team name, or leverage teams.df directly
+
+teams.df <- data.frame(teamAbbrev = levels(as.factor(raw.df$opponentTeamAbbrev)),
+                       teamFullName = levels(as.factor(raw.df$teamFullName)))
+getTeamAbbr = teams.df$teamAbbrev
+names(getTeamAbbr) = teams.df$teamFullName
+
+# Clean up the errors
+getTeamAbbr [c("Winnipeg Jets",
+                           "Washington Capitals",
+                           'Carolina Hurricanes',
+              'Columbus Blue Jackets',
+              'Calgary Flames',
+              'Chicago Blackhawks',
+              'Colorado Avalanche',
+              'New Jersey Devils',
+              'Nashville Predators',
+              'Seattle Kraken',
+              'San Jose Sharks')] <- c('WPG',
+              'WSH',
+              'CAR',
+              'CBJ',
+              'CGY',
+              'CHI',
+              'COL',
+              'NJD',
+              'NSH',
+              'SEA',
+              'SJS')
+
+teams.df$teamFullName = names(getTeamAbbr)
+```
+
+**Engineer features**
+
+-   Future state:
+
+    -   Advanced Strength of starting goaltender
+
+    -   Travel KM and Time since last game
+
+    -   Recent PP/PK
+
+    -   Shots for/against
+
+    -   More elaborate "rested" flags - IE, 3 games in 4 nights, or opponent's rested vs fatigued flag
+
+    -   More rolling stats incl advanced stats like corsi and fenwick or expected goals for from previous games
+
+```{r}
+# Adds flag variables
+# Adds rolling window variables (for now, only % games won in preceding 7/3 games)
+
+# Don't think this is needed at this stage... final selection happens later
+# cols <- c("gameDate",
+#           "opponentTeamAbbrev",
+#           "teamFullName",
+#           "goalsAgainst",
+#           "goalsFor",
+#           "homeRoad", # to be dropped
+#           "wins",
+#           "losses",
+#           "otLosses",
+#           "season"
+#           )
+
+processed.df <- raw.df %>% 
+  # select(cols) %>%
+  group_by(teamFullName, season) %>% 
+  arrange(gameDate) %>%
+  mutate("shotDifferential" = shotsForPerGame - shotsAgainstPerGame) %>%
+  mutate(
+    "prevGameScoreDifferential" = lag(goalsAgainst, 
+                                                         n = 1, 
+                                                         default = 0) - lag(goalsFor, 
+                                                         n = 1, 
+                                                         default = 0),
+    "daysSinceLastGame" = as.integer(gameDate - lag(gameDate, 
+                                                         n = 1, 
+                                                         default = gameDate[1])),
+    "r7_winRatio" = rollapply(data = wins, 
+                          width = list(c(-7,-6,-5,-4,-3,-2, -1)),
+                          FUN = mean,
+                          na.rm = TRUE,
+                          fill = NA,
+                          align = "right"),
+         "r3_winRatio" = rollapply(data = wins, 
+                          width = list(c(-3,-2, -1)),
+                          FUN = mean,
+                          na.rm = TRUE,
+                          fill = NA,
+                           align = "right")#,
+         #    "r7_shotDifferential" = rollapply(data = shotDifferential, 
+         #                  width = list(c(-7,-6,-5,-4,-3,-2, -1)),
+         #                  FUN = mean,
+         #                  na.rm = TRUE,
+         #                  fill = NA,
+         #                  align = "right"),
+         # "r3_shotDifferential" = rollapply(data = shotDifferential, 
+         #                  width = list(c(-3,-2, -1)),
+         #                  FUN = mean,
+         #                  na.rm = TRUE,
+         #                  fill = NA,
+         #                  align = "right")
+         ) %>%
+  rowwise() %>%
+  mutate("flagB2B" = makeflagB2B(daysSinceLastGame),
+         "flagHome" = as.integer(makeflagHome(homeRoad)),
+         "flagBlownOut" = makeflagBlownOut(prevGameScoreDifferential),
+         "teamAbbrev" = unname(getTeamAbbr[teamFullName]))
+
+```
+
+This joins the ELO data and builds associated features:
+
+```{r}
+# Add and index for game # of season per team
+# Season needs to be truncated to last 4 digits in the processed df
+
+# This will need some more thought... maybe add separate index for home / away per team and then join those (might require iteration)
+
+processed.df <- processed.df %>% 
+  group_by(teamFullName, season) %>% 
+  arrange(gameDate) %>% 
+  mutate("gameNumber" = row_number(),
+         "seasonTrimmed" =  as.integer(substr(season,5,8)))
+
+# Because the dates are often incorrect in the elo dataset, need to create game number per team to join on
+
+for (team in teams.df$teamAbbrev) {
+  if(!exists("eloProcessed.df")) {
+    eloProcessed.df <- elo.df %>% 
+    filter(home_team_abbr == team | away_team_abbr == team) %>% 
+    group_by(season) %>%
+    arrange(date) %>%
+    mutate("focusTeam" = team,
+           "gameNumber" = row_number())
+  } else {
+    temp.df <- elo.df %>% 
+    filter(home_team_abbr == team | away_team_abbr == team) %>% 
+    group_by(season) %>%
+    arrange(date) %>%
+    mutate("focusTeam" = team,
+           "gameNumber" = row_number())
+    eloProcessed.df <- rbind(eloProcessed.df,temp.df)
+  }
+}
+
+joinedData.df <- left_join(x=processed.df,
+                  y=eloProcessed.df,
+                  by=c('teamAbbrev'='focusTeam', 
+                       'gameNumber'='gameNumber',
+                       'seasonTrimmed'='season')) %>% 
+  rowwise %>%
+  mutate("eloDifferential"= as.integer(makeEloMultiplier(homeRoad)) * (home_team_pregame_rating - away_team_pregame_rating),
+         "elo" = makeElo(homeRoad,home_team_pregame_rating,away_team_pregame_rating),
+         "opponentElo" = makeElo(homeRoad,away_team_pregame_rating,home_team_pregame_rating))
+```
+
+This limits the final dataframe to the features that I want to keep and the outcome variable, and splits off the current season to use for out of sample testing
+
+```{r}
+finalCols = c("prevGameScoreDifferential",
+              "daysSinceLastGame",
+              "r7_winRatio",
+              "r3_winRatio",
+              #"r7_shotDifferential",
+              #"r3_shotDifferential",
+              "flagB2B",
+              "flagHome",
+              "flagBlownOut",
+              "eloDifferential",
+              "wins")
+latestData.df <- joinedData.df %>% ungroup() %>% filter(season == latest) #%>% select(finalCols)
+#lastData.df.all <- joinedData.df %>% ungroup() %>% filter(season == latest)
+modellingData.df <- joinedData.df %>% ungroup() %>% filter(season != latest) %>% select(finalCols) 
+
+```
+
+**Model-building: native R approaches**
+
+Train / test split and normalize the data
+
+```{r}
+# Train / test split
+split <- sample(c(rep(0, 0.7 * nrow(modellingData.df)), rep(1, 0.3 * nrow(modellingData.df))))
+
+train <- modellingData.df[which(split == 0), ] %>% filter(!is.na(r7_winRatio))
+test <- modellingData.df[which(split == 1), ] %>% filter(!is.na(r7_winRatio))
+
+normParam <- preProcess(train[,!(colnames(train) %in% c("wins","flagB2B","flagHome","flagBlownOut"))])
+norm.trainData <- predict(normParam, train)
+norm.testData <- predict(normParam, test)
+
+```
+
+Dummy model: predict the home team will win
+
+```{r}
+modelName = "Dummy model"
+
+# Predict that the home team wins
+predict_reg <- test$flagHome
+
+# Print confusion matrix, accuracy, ROC AUC, and log loss
+missing_classerr <- mean(predict_reg != test$wins)
+
+# ROC-AUC Curve
+ROCPred <- prediction(predict_reg, test$wins)
+ROCPer <- performance(ROCPred, measure = "tpr",
+                             x.measure = "fpr")
+
+auc <- performance(ROCPred, measure = "auc")
+auc <- auc@y.values[[1]]
+
+
+# Plotting curve
+plot(ROCPer)
+plot(ROCPer, colorize = TRUE,
+     print.cutoffs.at = seq(0.1, by = 0.1),
+     main = "ROC CURVE")
+abline(a = 0, b = 1)
+
+auc <- round(auc, 4)
+legend(.6, .4, auc, title = "AUC", cex = 1)
+
+paste(c("#### MODEL NAME: ",modelName," ####"),collapse = "")
+table(test$wins, predict_reg)
+paste(c("Accuracy: ", round((1 - missing_classerr),4),collapse = ""))
+paste(c("AUC: ",auc),collapse = "")
+paste(c("Log loss: ",logLoss(pred = predict_reg,actual = test$wins)),collapse = "")
+
+```
+
+Logistic regression
+
+```{r}
+# Training model
+# modelName = "Logistic Regression"
+# model_logistic <- glm(wins ~ ., 
+#                       data = norm.trainData, 
+#                       family = "binomial")
+# model_logistic
+#    
+# # Summary
+# summary(model_logistic)
+# 
+# # Predict test data based on model
+# predict_reg <- predict(model_logistic, 
+#                        norm.testData, type = "response")
+# 
+# predict_ratio <- predict_reg
+# # Changing probabilities
+# predict_reg <- ifelse(predict_reg >0.5, 1, 0)
+# 
+# # Print confusion matrix, accuracy, ROC AUC, and log loss    
+# missing_classerr <- mean(predict_reg != norm.testData$wins)
+# 
+# # ROC-AUC Curve
+# ROCPred <- prediction(predict_reg, norm.testData$wins) 
+# ROCPer <- performance(ROCPred, measure = "tpr", 
+#                              x.measure = "fpr")
+#    
+# auc <- performance(ROCPred, measure = "auc")
+# auc <- auc@y.values[[1]]
+# 
+#    
+# # Plotting curve
+# plot(ROCPer)
+# plot(ROCPer, colorize = TRUE, 
+#      print.cutoffs.at = seq(0.1, by = 0.1), 
+#      main = "ROC CURVE")
+# abline(a = 0, b = 1)
+#    
+# auc <- round(auc, 4)
+# legend(.6, .4, auc, title = "AUC", cex = 1)
+# 
+# paste(c("#### MODEL NAME: ",modelName," ####"),collapse = "")
+# table(norm.testData$wins, predict_reg)
+# paste(c("Accuracy: ", round((1 - missing_classerr),4),collapse = ""))
+# paste(c("AUC: ",auc),collapse = "")
+# paste(c("Log loss: ",round(logLoss(predict_ratio,norm.testData$wins)),4),collapse = "")
+
+```
+
+KNN
+
+```{r}
+# Training model
+# modelName = "K Nearest-Neightbors"
+# initialK <- round(sqrt(nrow(train)))
+# 
+# model <- knn(train = norm.trainData[,!(colnames(norm.trainData) == "wins")],
+#              test = norm.testData[,!(colnames(norm.testData) == "wins")],
+#              cl=norm.trainData$wins,k=initialK,prob = TRUE
+#             )
+#    
+# # Summary
+# summary(model)
+# 
+# # Predict test data based on model
+# predict_ratio <- attr(model,"prob")
+# 
+# # Changing probabilities
+# predict_reg <- model
+# 
+# # Print confusion matrix, accuracy, ROC AUC, and log loss    
+# missing_classerr <- mean(predict_reg != norm.testData$wins)
+# 
+# # ROC-AUC Curve
+# ROCPred <- prediction(as.numeric(predict_reg), norm.testData$wins) 
+# ROCPer <- performance(ROCPred, measure = "tpr", 
+#                              x.measure = "fpr")
+#    
+# auc <- performance(ROCPred, measure = "auc")
+# auc <- auc@y.values[[1]]
+# 
+#    
+# # Plotting curve
+# plot(ROCPer)
+# plot(ROCPer, colorize = TRUE, 
+#      print.cutoffs.at = seq(0.1, by = 0.1), 
+#      main = "ROC CURVE")
+# abline(a = 0, b = 1)
+#    
+# auc <- round(auc, 4)
+# legend(.6, .4, auc, title = "AUC", cex = 1)
+# 
+# paste(c("#### MODEL NAME: ",modelName," ####"),collapse = "")
+# table(norm.testData$wins, predict_reg)
+# paste(c("Accuracy: ", round((1 - missing_classerr),4),collapse = ""))
+# paste(c("AUC: ",auc),collapse = "")
+# paste(c("Log loss: ",round(logLoss(predict_ratio,norm.testData$wins)),4),collapse = "")
+```
+
+SVM
+
+```{r}
+# Training model
+# modelName = "SVM"
+# model <- e1071::svm(wins ~.,
+#                     data = norm.trainData, 
+#                     type ="C-classification",
+#                     probability = TRUE)
+# model
+#    
+# # Summary
+# summary(model)
+# 
+# # Predict test data based on model
+# predict_reg <- predict(model, 
+#                        norm.testData, 
+#                        type = "response", 
+#                        probability = TRUE)
+# 
+# predict_ratio <- attr(predict_reg, "probabilities")
+# 
+# # Changing probabilities
+# predict_reg <- ifelse(predict_ratio >0.5, 1, 0)
+# 
+# # Print confusion matrix, accuracy, ROC AUC, and log loss    
+# missing_classerr <- mean(predict_reg[,2] != norm.testData$wins)
+# 
+# # ROC-AUC Curve
+# ROCPred <- prediction(predict_reg[,2], norm.testData$wins) 
+# ROCPer <- performance(ROCPred, measure = "tpr", 
+#                              x.measure = "fpr")
+#    
+# auc <- performance(ROCPred, measure = "auc")
+# auc <- auc@y.values[[1]]
+# 
+#    
+# # Plotting curve
+# plot(ROCPer)
+# plot(ROCPer, colorize = TRUE, 
+#      print.cutoffs.at = seq(0.1, by = 0.1), 
+#      main = "ROC CURVE")
+# abline(a = 0, b = 1)
+#    
+# auc <- round(auc, 4)
+# legend(.6, .4, auc, title = "AUC", cex = 1)
+# 
+# paste(c("#### MODEL NAME: ",modelName," ####"),collapse = "")
+# table(norm.testData$wins, predict_reg[,2])
+# paste(c("Accuracy: ", round(1 - missing_classerr,4),collapse = ""))
+# paste(c("AUC: ",auc),collapse = "")
+# paste(c("Log loss: ",round(logLoss(predict_ratio,norm.testData$wins)),4),collapse = "")
+
+```
+
+**Model-building: Tidymodels approaches**
+
+Define models, performance measures, and parameters to be tuned
+
+```{r}
+plan(multicore) 
+modellingData.df$wins <- as.factor(modellingData.df$wins)
+modellingData.df <- modellingData.df %>% filter(!is.na(r7_winRatio)) %>% mutate_if(is.integer, as.numeric)
+# Train/test split
+split <- initial_split(modellingData.df, prop = 7/10)
+tidyTrain <- split %>% training()
+tidyTest <- split %>% testing()
+
+# Create folds for cross validation
+myFolds <- vfold_cv(tidyTrain, repeats = 10)
+
+# create reusable recipe for all models
+recipe <- tidyTrain %>%
+  recipe(wins ~ .) %>%
+  # normalize all non-dummy, numeric predictors
+  step_normalize(-contains(c("wins","flagB2B","flagHome","flagBlownOut"))) %>%
+  # create dummy variables 
+  # step_dummy(all_nominal(), - all_outcomes()) %>%
+  # remove zero variance predictors
+  step_nzv(all_predictors(), - all_outcomes()) %>%
+  # remove highly correlated vars
+  step_corr(all_numeric(), threshold = 0.75) #%>%
+  # deal with class imbalance
+  # themis::step_rose(Attrition)
+
+# Prepare for parallel processing
+all_cores <- parallel::detectCores(logical = TRUE)
+doParallel::registerDoParallel(cores = all_cores)
+
+# create model-specific recipes
+log_spec <- 
+  logistic_reg(penalty = tune(), # lambda
+               mixture = tune()) %>% # alpha 
+  set_mode("classification") %>%
+  set_engine("glmnet") 
+
+svm_spec <- 
+  svm_rbf(cost = tune(), 
+          rbf_sigma = tune()) %>% 
+  set_mode("classification") %>%
+  set_engine("kernlab") 
+
+knn_spec <- 
+  nearest_neighbor(neighbors = tune(), 
+                   weight_func = tune()) %>% 
+  set_mode("classification") %>%
+  set_engine("kknn") 
+
+xgb_spec <- 
+  parsnip::boost_tree(mtry = tune(), # colsample_bytree
+                      sample_size = tune(), # subsample
+                      tree_depth = tune(), # max_depth
+                      trees = 100, # n_rounds 
+                      learn_rate = tune(), # eta
+                      loss_reduction = tune(), # gamma
+                      min_n = tune()) %>% # min_child_weight
+  set_mode("classification") %>%
+  set_engine("xgboost")
+
+xgb_params <- 
+  dials::parameters(list(
+    min_n(),
+    tree_depth(),
+    learn_rate(),
+    loss_reduction(),
+    sample_size = sample_prop(),
+    finalize(mtry(), train)
+  ))
+# Neural net I'm testing without grid search tuning, just to see processing time
+# nnet_spec <- mlp(epochs = 100, 
+#                  hidden_units = 5, 
+#                  dropout = 0.1) %>%
+#   set_mode("classification") %>% 
+#   set_engine("keras", verbose = 0) 
+
+# Create params object for glmnet
+glmnet_params <- 
+  dials::parameters(list(
+    penalty(), 
+    mixture()
+  ))
+
+# Create params object for knn
+knn_params <- 
+    dials::parameters(list(
+    neighbors(), 
+    weight_func()
+  ))
+
+# Create params object for svm
+svm_params <- 
+    dials::parameters(list(
+    cost(), 
+    rbf_sigma()
+  ))
+
+# Create params object for XGB
+xgb_params <- 
+  dials::parameters(list(
+    min_n(),
+    tree_depth(),
+    learn_rate(),
+    loss_reduction(),
+    sample_size = sample_prop(),
+    finalize(mtry(), train)
+  ))
+
+# Generate irregular grids
+glmnet_grid <- grid_latin_hypercube(glmnet_params,
+                           size = 9 # to match caret default which is 3^p where p = # of params being tuned
+                            )
+xgbTree_grid <- grid_latin_hypercube(xgb_params, 
+                            size = 108 #like caret
+                            )
+
+svm_grid <- grid_latin_hypercube(svm_params,
+                           size = 9)
+
+knn_grid <- grid_latin_hypercube(knn_params,
+                           size = 9)
+
+my_models <- 
+  workflow_set(
+    preproc = list(recipe),
+    models = list(#nnet = nnet_spec, # Fatal error terminates R session
+                  svm = svm_spec, 
+                  knn = knn_spec, 
+                  glmnet = log_spec, 
+                  xgbTree = xgb_spec),
+    cross = TRUE
+  ) %>%
+  # add custom grid 
+  option_add(grid = xgbTree_grid, id = "recipe_xgbTree") %>%
+  option_add(grid = glmnet_grid, id = "recipe_glmnet") %>%
+  option_add(grid = svm_grid, id = "recipe_svm") %>%
+  option_add(grid = knn_grid, id = "recipe_knn") 
+
+my_models
+
+# create custom metrics
+metrics <- metric_set(bal_accuracy, roc_auc, yardstick::sensitivity, yardstick::specificity, yardstick::precision, yardstick::mn_log_loss, f_meas)
+
+```
+
+Model Tuning
+
+```{r echo = FALSE}
+model_race <- my_models %>% 
+  workflow_map("tune_grid", resamples = myFolds, verbose = TRUE,
+               control = tune::control_grid(verbose = TRUE),
+               metrics = metrics)
+
+```
+
+Evaluate models' performance
+
+```{r}
+model_race %>% collect_metrics(metrics = metrics) %>%
+  group_by(wflow_id) #%>% filter(.metric = "m")
+
+autoplot(model_race)
+
+print(model_race %>% collect_metrics(metrics = metrics) %>% filter(.metric == "mn_log_loss") %>% arrange(mean))
+
+```
+
+Extract the best model
+
+```{r}
+# combine parameter combinations with metrics and predictions
+results <- model_race %>% 
+  extract_workflow_set_result("recipe_glmnet")
+
+# select best workflow
+best_results <- results %>%
+  select_best(metric = "mn_log_loss")
+
+# finalize workflow
+glmnet_wkfl <- model_race %>%
+  extract_workflow("recipe_glmnet") %>%
+  finalize_workflow(best_results)
+glmnet_wkfl
+
+```
+
+Assess best model's performance against multiple folds of the test data and plot its predictions vs actual
+
+```{r}
+# assess model performance across different folds of train data
+glmnet_res_results <- glmnet_wkfl %>%
+  fit_resamples(resamples = myFolds,
+                metrics = metrics,
+                control = control_resamples(save_pred = TRUE))
+
+# get metrices of training folds
+collect_metrics(glmnet_res_results)
+
+# train on training data and test on test data
+glmnet_final <- glmnet_wkfl %>%
+  last_fit(split = split, metrics = metrics) 
+
+# plot predictions
+data.frame(glmnet_final$.predictions) %>%
+  ggplot() +
+  geom_density(aes(x = .pred_1, fill = wins),
+               alpha = 0.5)+
+  geom_vline(xintercept = 0.5,linetype = "dashed")+
+  ggtitle("Predicted class probabilities coloured by wins")+
+  theme_bw()
+
+```
+
+Assess best model's performance on unseen data
+
+```{r}
+# Reference the final metrics of the model based on train/test evaluation
+glmnet_final$.metrics
+
+# Re-train on whole historical dataset, then test on current season
+glmnet_fit <- fit(glmnet_wkfl, tidyTrain)
+                  
+# Predict
+
+pred_class <- predict(glmnet_fit, 
+                              latestData.df) %>% filter(!is.na(.pred_class))
+
+glmnet_latest_pred <- predict(glmnet_fit, 
+                              latestData.df, 
+                              type='prob') %>%
+                      bind_cols(latestData.df) 
+
+glmnet_latest_pred <- glmnet_latest_pred %>% 
+  mutate(term1 = (as.numeric(wins)-1)*log(.pred_1),
+         term2.1 = (1-(as.numeric(wins)-1)),
+         term2.2 =log(1-.pred_1), 
+         term2 = (1-(as.numeric(wins)-1))*log(1-.pred_1),
+    logloss = -1 *
+           ((as.numeric(wins)-1)*log(.pred_1)+(1-((as.numeric(wins))-1))*log(1-.pred_1))) %>%   filter(!is.na(.pred_1)) %>%
+  cbind(pred_class) 
+
+#glmnet_latest_pred <- glmnet_latest_pred %>% bind_cols(latestData.df) 
+
+glmnet_loss <- glmnet_latest_pred %>% filter(!is.na(.pred_1)) %>% summarize(mean_log_loss = mean(logloss))
+
+glmnet_latest_pred$wins <- as.factor(glmnet_latest_pred$wins)
+glmnet_latest_pred$.pred_class <- as.factor(glmnet_latest_pred$.pred_class)
+
+# Current season
+conf_mat(glmnet_latest_pred,
+          truth = wins,
+          estimate = .pred_class)
+
+mn_log_loss(data = glmnet_latest_pred,
+            truth = wins,
+            estimate = .pred_0)
+
+accuracy(data = glmnet_latest_pred,
+            truth = wins,
+            estimate = .pred_class)
+
+twitterLogloss <- mn_log_loss(data = glmnet_latest_pred %>% filter(date <= ymd("2023-02-23")),
+            truth = wins,
+            estimate = .pred_0)
+
+glmnet_latest_pred %>%
+  ggplot() +
+  geom_density(aes(x = .pred_1, fill = wins),
+               alpha = 0.5)+
+  geom_vline(xintercept = 0.5,linetype = "dashed") +
+  ggtitle("Predicted class probabilities coloured by wins") +
+  theme_bw()
+
+
+```
+
+![](images/paste-ED0239EC.png)Try all approaches in DS course:
+
+-   Neural net -\> normalize features
+
+-   OK KNN -\> normalize features
+
+-   OK Logistic regression
+
+-   OK Random forest / XGBoost
+
+-   SVM -\> normalize features
